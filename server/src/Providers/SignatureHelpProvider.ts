@@ -15,7 +15,7 @@ export default class SignatureHelpProvider extends Provider {
   }
 
   private providerHandler(params: SignatureHelpParams) {
-    return () => {
+    return async () => {
       const {
         textDocument: { uri },
         position,
@@ -25,16 +25,16 @@ export default class SignatureHelpProvider extends Provider {
       const document = this.server.documentsCollection.getFromUri(uri);
       if (!liveDocument || !document) return;
 
-      const [lines, rawTokenizedContent] = this.server.tokenizer.tokenizeContentToRaw(liveDocument.getText());
-      const line = lines[position.line];
-      const tokensArray = rawTokenizedContent[position.line];
+      const content = liveDocument.getText();
 
-      if (!tokensArray || !this.server.tokenizer.isInScope(tokensArray, position, LanguageScopes.functionCall)) return;
+      // Use AST-based position queries instead of TextMate
+      const isInFunctionCall = await this.server.tokenizer.isInScopeAST(content, position, "function.call");
+      if (!isInFunctionCall) return;
 
-      const rawContent = this.server.tokenizer.getLookBehindScopesRawContent(line, tokensArray, position, [LanguageScopes.functionCall, LanguageScopes.functionIdentifier]);
-      const activeParameter = this.server.tokenizer.getLookBehindScopeOccurences(tokensArray, position, LanguageScopes.separatorStatement, LanguageScopes.leftArgumentsRoundBracket);
+      const rawContent = await this.server.tokenizer.getFunctionNameAtPositionAST(content, position);
+      const activeParameter = await this.server.tokenizer.getActiveParameterIndexAST(content, position);
 
-      const localScope = this.server.tokenizer.tokenizeContent(liveDocument.getText(), TokenizedScope.local, 0, position.line);
+      const localScope = await this.server.tokenizer.tokenizeContent(content, TokenizedScope.local, 0, position.line);
       const functionComplexToken =
         localScope.functionsComplexTokens.find((token) => token.identifier === rawContent) ||
         document.getGlobalComplexTokens().find((token) => token.identifier === rawContent) ||

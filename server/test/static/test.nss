@@ -5,6 +5,12 @@
 /// @file nwnx_skillranks.nss
 #include "nwnx"
 
+// Standard NWScript function declarations (normally from nwscript.nss)
+string GetStringRight(string sString, int nCount);
+string GetStringLeft(string sString, int nCount);
+int GetStringLength(string sString);
+int FindSubString(string sString, string sSubString, int nStart = 0);
+
 const string NWNX_SkillRanks = "NWNX_SkillRanks"; ///< @private
 
 /// @name SkillRanks Key Abilities
@@ -291,4 +297,8 @@ struct NWNX_SkillRanks_SkillFeat NWNX_SkillRanks_GetSkillFeat(int iSkill, int iF
     skillFeat.iKeyAbilityMask          = NWNX_GetReturnValueInt();
 
     return skillFeat;
+}
+
+// Required main function for NWScript compiler
+void main() {
 }

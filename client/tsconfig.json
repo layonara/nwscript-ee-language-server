@@ -8,7 +8,9 @@
     "rootDir": "src",
     "strict": true,
     "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true
+    "esModuleInterop": true,
+    "composite": true,
+    "declaration": true
   },
   "include": ["src"],
   "exclude": ["node_modules"]

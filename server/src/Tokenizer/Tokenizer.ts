@@ -7,8 +7,12 @@ import { Registry, INITIAL, parseRawGrammar, IToken } from "vscode-textmate";
 import { CompletionItemKind } from "vscode-languageserver";
 
 import type { ComplexToken, FunctionComplexToken, FunctionParamComplexToken, StructComplexToken, VariableComplexToken } from "./types";
-import { LanguageTypes, LanguageScopes } from "./constants";
+import { LanguageScopes } from "./constants";
 import onigLib from "../onigLib";
+import { getParser } from "../Parser/NWScriptParser";
+import { extractGlobalTokens, extractLocalTokens } from "../Parser/ASTTraversal";
+import type { AST } from "../Parser/ASTTypes";
+import { ASTPositionQuery } from "../Parser/ASTPositionQuery";
 
 export enum TokenizedScope {
   global = "global",
@@ -26,13 +30,28 @@ export type LocalScopeTokenizationResult = {
   functionVariablesComplexTokens: (VariableComplexToken | FunctionParamComplexToken)[];
 };
 
-// Naive implementation
-// Ideally we would use an AST tree
-// See the Notes section of the README for the explications
+/**
+ * Hybrid tokenizer using AST for structural analysis and TextMate for position queries.
+ *
+ * Architecture:
+ * - AST (via NWScript compiler): Parses file structure, extracts functions/variables/structs
+ * - TextMate: Provides fine-grained token positions for LSP position-based queries
+ *
+ * Why hybrid?
+ * - AST is great for "what's in this file" but doesn't support "what's at this position"
+ * - TextMate is great for cursor position queries but slower for full-file analysis
+ */
 export default class Tokenizer {
+  // TextMate registry for position-based queries
   private readonly registry: Registry;
   private grammar: IGrammar | null = null;
-  private readonly localScopeCache: (IToken[] | undefined)[] | null = null;
+
+  // AST cache for structural tokenization
+  private cachedAST: AST | null = null;
+  private lastParsedContent: string = "";
+
+  // AST-based position query service
+  private positionQuery: ASTPositionQuery | null = null;
 
   constructor(localPath = false) {
     this.registry = new Registry({
@@ -41,359 +60,197 @@ export default class Tokenizer {
         return await new Promise((resolve, reject) => {
           if (scopeName === "source.nss") {
             const grammar = readFileSync(join(__dirname, "..", "..", localPath ? ".." : "", "syntaxes", "nwscript-ee.tmLanguage"));
-
             return resolve(parseRawGrammar(grammar.toString()));
           }
-
           reject(new Error(`Unknown scope name: ${scopeName}`));
         });
       },
     });
   }
 
-  private getTokenIndexAtPosition(tokensArray: IToken[], position: Position) {
-    return tokensArray.findIndex((token) => token.startIndex <= position.character && token.endIndex >= position.character);
+  /**
+   * Initialize the TextMate grammar.
+   * Must be called before using any tokenization methods.
+   */
+  public async loadGrammar() {
+    this.grammar = await this.registry.loadGrammar("source.nss");
+    return this;
   }
 
-  private getTokenAtPosition(tokensArray: IToken[], position: Position) {
-    return tokensArray.find((token) => token.startIndex <= position.character && token.endIndex >= position.character);
-  }
+  // ============================================================================
+  // AST-BASED TOKENIZATION (Structural Analysis)
+  // ============================================================================
+  // These methods use the NWScript compiler to parse and extract tokens.
+  // Used for: indexing files, extracting all functions/variables/structs
 
-  private getRawTokenContent(line: string, token: IToken) {
-    return line.slice(token.startIndex, token.endIndex);
-  }
+  /**
+   * Tokenize content using AST parser to extract structural tokens.
+   *
+   * @param content - The NWScript source code
+   * @param scope - Whether to extract global or local scope tokens
+   * @param startIndex - Starting line for local scope (0-indexed)
+   * @param stopIndex - Ending line for local scope (0-indexed, -1 for end of file)
+   * @returns Extracted tokens based on scope
+   */
 
-  private getTokenIndex(tokensArray: IToken[], targetToken: IToken) {
-    return tokensArray.findIndex((token) => token.startIndex === targetToken.startIndex);
-  }
+  public tokenizeContent(content: string, scope: TokenizedScope.global, startIndex?: number, stopIndex?: number): Promise<GlobalScopeTokenizationResult>;
+  public tokenizeContent(content: string, scope: TokenizedScope.local, startIndex?: number, stopIndex?: number): Promise<LocalScopeTokenizationResult>;
+  public async tokenizeContent(content: string, scope: TokenizedScope, startIndex: number = 0, stopIndex: number = -1): Promise<GlobalScopeTokenizationResult | LocalScopeTokenizationResult> {
+    // Parse content to AST if not cached or content changed
+    if (this.lastParsedContent !== content) {
+      const parser = await getParser();
+      const { ast, errors } = await parser.parse(content);
 
-  private getTokenLanguageType(line: string, tokens: IToken[], index: number) {
-    const rawContent = this.getRawTokenContent(line, tokens[index]);
-
-    const type = LanguageTypes[rawContent as keyof typeof LanguageTypes] || rawContent;
-    return (type === LanguageTypes.struct ? this.getRawTokenContent(line, tokens[index + 2]) : type) as LanguageTypes;
-  }
-
-  private getConstantValue(line: string, tokensArray: IToken[]) {
-    const startIndex = tokensArray.findIndex((token) => token.scopes.includes(LanguageScopes.assignationStatement));
-    const endIndex = tokensArray.findIndex((token) => token.scopes.includes(LanguageScopes.terminatorStatement));
-
-    return tokensArray
-      .filter((_, index) => index > startIndex && index < endIndex)
-      .map((token) => this.getRawTokenContent(line, token))
-      .join("")
-      .trim();
-  }
-
-  private getFunctionParams(lineIndex: number, lines: string[], tokensArrays: (IToken[] | undefined)[]) {
-    let params: FunctionParamComplexToken[] = [];
-    let line;
-    let tokensArray;
-
-    lineIndex = lineIndex - 1;
-    do {
-      lineIndex = lineIndex + 1;
-      line = lines[lineIndex];
-      tokensArray = tokensArrays[lineIndex]!;
-
-      params = params.concat(this.getInlineFunctionParams(line, lineIndex, tokensArray));
-    } while (!Boolean(tokensArray.find((token) => token.scopes.includes(LanguageScopes.rightParametersRoundBracket))));
-
-    return params;
-  }
-
-  private getInlineFunctionParams(line: string, lineIndex: number, tokensArray: IToken[]) {
-    const functionParamTokens = tokensArray.filter(
-      (token) => token.scopes.includes(LanguageScopes.functionParameters) && (token.scopes.includes(LanguageScopes.functionParameter) || token.scopes.includes(LanguageScopes.variableIdentifer)),
-    );
-
-    return functionParamTokens.map((token) => {
-      const tokenIndex = this.getTokenIndex(tokensArray, token);
-      let defaultValue = "";
-
-      if (tokensArray[tokenIndex + 2]?.scopes.includes(LanguageScopes.assignationStatement)) {
-        let index = tokenIndex + 4;
-
-        while (
-          index < tokensArray.length &&
-          !tokensArray[index].scopes.includes(LanguageScopes.separatorStatement) &&
-          !tokensArray[index].scopes.includes(LanguageScopes.rightParametersRoundBracket) &&
-          !tokensArray[index].scopes.includes(LanguageScopes.commentStatement)
-        ) {
-          defaultValue += this.getRawTokenContent(line, tokensArray[index]);
-          index++;
-        }
-      }
-
-      return {
-        position: { line: lineIndex, character: token.startIndex },
-        identifier: this.getRawTokenContent(line, token),
-        tokenType: CompletionItemKind.TypeParameter,
-        valueType: this.getTokenLanguageType(line, tokensArray, tokenIndex - 2),
-        defaultValue: defaultValue.trim() || undefined,
-      };
-    });
-  }
-
-  private getFunctionComments(lines: string[], tokensLines: (IToken[] | undefined)[], index: number) {
-    const comments: string[] = [];
-
-    let errorSafeIndex = Math.max(index, 0);
-    while (tokensLines[errorSafeIndex]?.at(0)?.scopes.find((scope) => scope === LanguageScopes.commentStatement || scope === LanguageScopes.documentationCommentStatement)) {
-      comments.unshift(lines[errorSafeIndex]);
-      errorSafeIndex--;
-    }
-
-    return comments;
-  }
-
-  private isFunctionDeclaration(lineIndex: number, tokensArrays: (IToken[] | undefined)[]) {
-    let isFunctionDeclaration = false;
-    let tokensArray = tokensArrays[lineIndex]!;
-    let isLastParamsLine = false;
-
-    while (!isLastParamsLine) {
-      isLastParamsLine = Boolean(tokensArray.find((token) => token.scopes.includes(LanguageScopes.rightParametersRoundBracket)));
-
-      if (isLastParamsLine && Boolean(tokensArray.find((token) => token.scopes.includes(LanguageScopes.terminatorStatement) && !token.scopes.includes(LanguageScopes.block)))) {
-        isFunctionDeclaration = true;
-      }
-
-      lineIndex = lineIndex + 1;
-      tokensArray = tokensArrays[lineIndex]!;
-    }
-
-    return isFunctionDeclaration;
-  }
-
-  private isGlobalFunctionDeclaration(lineIndex: number, tokenIndex: number, token: IToken, tokensArrays: (IToken[] | undefined)[]) {
-    return (
-      !(tokenIndex === 0 && lineIndex === 0) && // Not sure why we need this
-      !token.scopes.includes(LanguageScopes.block) &&
-      token.scopes.includes(LanguageScopes.functionIdentifier) &&
-      this.isFunctionDeclaration(lineIndex, tokensArrays)
-    );
-  }
-
-  private isLocalFunctionDeclaration(lineIndex: number, tokenIndex: number, token: IToken, tokensArrays: (IToken[] | undefined)[]) {
-    return (
-      token.scopes.includes(LanguageScopes.functionIdentifier) &&
-      !token.scopes.includes(LanguageScopes.block) &&
-      !(tokenIndex === 0 && lineIndex === 0) && // Not sure why we need this
-      !this.isFunctionDeclaration(lineIndex, tokensArrays)
-    );
-  }
-
-  private isGlobalConstant(token: IToken) {
-    return token.scopes.includes(LanguageScopes.constantIdentifer) && !token.scopes.includes(LanguageScopes.functionDeclaration) && !token.scopes.includes(LanguageScopes.block);
-  }
-
-  private isStructDeclaration(token: IToken, lastToken: IToken, lineIndex: number, tokensArrays: (IToken[] | undefined)[]) {
-    return (
-      token.scopes.includes(LanguageScopes.structIdentifier) &&
-      ((tokensArrays[lineIndex + 1]?.at(0)?.scopes.includes(LanguageScopes.blockDeclaraction) && lastToken.scopes.includes(LanguageScopes.structIdentifier)) ||
-        lastToken.scopes.includes(LanguageScopes.blockDeclaraction))
-    );
-  }
-
-  private isLocalVariable(tokenIndex: number, token: IToken, tokensArray: IToken[]) {
-    return (
-      token.scopes.includes(LanguageScopes.variableIdentifer) &&
-      tokenIndex > 1 &&
-      (tokensArray[tokenIndex - 2].scopes.includes(LanguageScopes.type) || tokensArray[tokenIndex - 2].scopes.includes(LanguageScopes.structIdentifier))
-    );
-  }
-
-  private tokenizeLinesForGlobalScope(lines: string[], tokensArrays: (IToken[] | undefined)[], startIndex: number = 0, stopIndex: number = -1) {
-    const firstLineIndex = startIndex > lines.length || startIndex < 0 ? 0 : startIndex;
-    const lastLineIndex = stopIndex + 10 > lines.length || stopIndex < 0 ? lines.length : stopIndex;
-    const scope: GlobalScopeTokenizationResult = {
-      complexTokens: [],
-      structComplexTokens: [],
-      children: [],
-    };
-
-    let currentStruct: StructComplexToken | null = null;
-    for (let lineIndex = firstLineIndex; lineIndex < lastLineIndex; lineIndex++) {
-      const line = lines[lineIndex];
-      const tokensArray = tokensArrays[lineIndex];
-
-      if (tokensArray) {
-        const lastIndex = tokensArray.length - 1;
-        const lastToken = tokensArray[lastIndex];
-        for (let tokenIndex = 0; tokenIndex < tokensArray.length; tokenIndex++) {
-          const token = tokensArray[tokenIndex];
-
-          if (currentStruct) {
-            if (token.scopes.includes(LanguageScopes.blockTermination)) {
-              scope.structComplexTokens.push(currentStruct);
-              currentStruct = null;
-            } else if (lastIndex > 0 && tokensArray[1].scopes.includes(LanguageScopes.type)) {
-              currentStruct.properties.push({
-                position: { line: lineIndex, character: tokensArray[3].startIndex },
-                identifier: this.getRawTokenContent(line, tokensArray[3]),
-                tokenType: CompletionItemKind.Property,
-                valueType: this.getTokenLanguageType(line, tokensArray, 1),
-              });
-            }
-
-            break;
-          }
-
-          if (token.scopes.includes(LanguageScopes.includeDeclaration)) {
-            scope.children.push(this.getRawTokenContent(line, tokensArray.at(-2)!));
-            break;
-          }
-
-          if (this.isGlobalConstant(token)) {
-            scope.complexTokens.push({
-              position: { line: lineIndex, character: token.startIndex },
-              identifier: this.getRawTokenContent(line, token),
-              tokenType: CompletionItemKind.Constant,
-              valueType: this.getTokenLanguageType(line, tokensArray, tokenIndex - 2),
-              value: this.getConstantValue(line, tokensArray),
-            });
-            break;
-          }
-
-          if (this.isGlobalFunctionDeclaration(lineIndex, tokenIndex, token, tokensArrays)) {
-            scope.complexTokens.push({
-              position: { line: lineIndex, character: token.startIndex },
-              identifier: this.getRawTokenContent(line, token),
-              tokenType: CompletionItemKind.Function,
-              returnType: tokenIndex === 0 ? this.getTokenLanguageType(lines[lineIndex - 1], tokensArrays[lineIndex - 1]!, 0) : this.getTokenLanguageType(line, tokensArray, tokenIndex - 2),
-              params: this.getFunctionParams(lineIndex, lines, tokensArrays),
-              comments: this.getFunctionComments(lines, tokensArrays, tokenIndex === 0 ? lineIndex - 2 : lineIndex - 1),
-            });
-
-            break;
-          }
-
-          if (this.isStructDeclaration(token, lastToken, lineIndex, tokensArrays)) {
-            currentStruct = {
-              position: { line: lineIndex, character: token.startIndex },
-              identifier: this.getRawTokenContent(line, token),
-              tokenType: CompletionItemKind.Struct,
-              properties: [],
-            };
-            break;
-          }
-        }
+      if (ast) {
+        this.cachedAST = ast;
+        this.lastParsedContent = content;
+        this.positionQuery = new ASTPositionQuery(ast);
+      } else {
+        console.warn("AST parsing failed:", errors);
+        return this.getEmptyResult(scope);
       }
     }
 
-    return scope;
-  }
-
-  private tokenizeLinesForLocalScope(lines: string[], tokensArrays: (IToken[] | undefined)[], startIndex: number = 0, stopIndex: number = -1) {
-    const firstLineIndex = startIndex > lines.length || startIndex < 0 ? 0 : startIndex;
-    const lastLineIndex = stopIndex > lines.length || stopIndex < 0 ? lines.length : stopIndex;
-    const scope: LocalScopeTokenizationResult = {
-      functionsComplexTokens: [],
-      functionVariablesComplexTokens: [],
-    };
-
-    let computeFunctionLocals = false;
-    let currentFunctionVariables = [];
-
-    for (let lineIndex = lastLineIndex; lineIndex >= firstLineIndex; lineIndex--) {
-      const line = lines[lineIndex];
-      const isLastLine = lineIndex === lastLineIndex;
-      const tokensArray = tokensArrays[lineIndex];
-
-      if (tokensArray) {
-        const lastIndex = tokensArray.length - 1;
-        const lastToken = tokensArray[lastIndex];
-
-        if (
-          (lastToken.scopes.includes(LanguageScopes.block) && lastToken.scopes.includes(LanguageScopes.blockTermination) && lastLineIndex === lines.length) ||
-          (isLastLine && (lastToken.scopes.includes(LanguageScopes.block) || lastToken.scopes.includes(LanguageScopes.functionDeclaration)))
-        ) {
-          computeFunctionLocals = true;
-        }
-
-        for (let tokenIndex = 0; tokenIndex < tokensArray.length; tokenIndex++) {
-          const token = tokensArray[tokenIndex];
-
-          if (computeFunctionLocals && this.isLocalVariable(tokenIndex, token, tokensArray)) {
-            const complexToken = {
-              position: { line: lineIndex, character: token.startIndex },
-              identifier: this.getRawTokenContent(line, token),
-              tokenType: CompletionItemKind.Variable,
-              valueType: this.getTokenLanguageType(line, tokensArray, tokenIndex - 2),
-            };
-            scope.functionVariablesComplexTokens.push(complexToken);
-            currentFunctionVariables.push(complexToken);
-
-            let nextVariableToken;
-            let currentVariableIndex = tokenIndex;
-            while (tokensArray[currentVariableIndex + 1] && tokensArray[currentVariableIndex + 1].scopes.includes(LanguageScopes.separatorStatement)) {
-              if (tokensArray[currentVariableIndex + 2].scopes.includes(LanguageScopes.variableIdentifer)) {
-                currentVariableIndex = currentVariableIndex + 2;
-              } else {
-                currentVariableIndex = currentVariableIndex + 3;
-              }
-
-              nextVariableToken = tokensArray[currentVariableIndex];
-              const complextToken = {
-                position: { line: lineIndex, character: nextVariableToken.startIndex },
-                identifier: this.getRawTokenContent(line, nextVariableToken),
-                tokenType: CompletionItemKind.Variable,
-                valueType: this.getTokenLanguageType(line, tokensArray, tokenIndex - 2),
-              };
-              scope.functionVariablesComplexTokens.push(complextToken);
-              currentFunctionVariables.push(complexToken);
-            }
-          }
-
-          if (computeFunctionLocals && token.scopes.includes(LanguageScopes.functionParameter)) {
-            scope.functionVariablesComplexTokens.push({
-              position: { line: lineIndex, character: token.startIndex },
-              identifier: this.getRawTokenContent(line, token),
-              tokenType: CompletionItemKind.TypeParameter,
-              valueType: this.getTokenLanguageType(line, tokensArray, tokenIndex - 2),
-            });
-          }
-
-          if (this.isLocalFunctionDeclaration(lineIndex, tokenIndex, token, tokensArrays)) {
-            scope.functionsComplexTokens.push({
-              position: { line: lineIndex, character: token.startIndex },
-              identifier: this.getRawTokenContent(line, token),
-              tokenType: CompletionItemKind.Function,
-              returnType: tokenIndex === 0 ? this.getTokenLanguageType(lines[lineIndex - 1], tokensArrays[lineIndex - 1]!, 0) : this.getTokenLanguageType(line, tokensArray, tokenIndex - 2),
-              params: this.getFunctionParams(lineIndex, lines, tokensArrays),
-              comments: this.getFunctionComments(lines, tokensArrays, tokenIndex === 0 ? lineIndex - 2 : lineIndex - 1),
-              variables: currentFunctionVariables,
-            });
-          }
-        }
-
-        // Needs to be after to allow one more iteration to fetch function params
-        if (computeFunctionLocals && !lastToken.scopes.includes(LanguageScopes.block)) {
-          computeFunctionLocals = false;
-          currentFunctionVariables = [];
-        }
-      }
+    if (!this.cachedAST) {
+      return this.getEmptyResult(scope);
     }
 
-    return scope;
-  }
-
-  public tokenizeContent(content: string, scope: TokenizedScope.global, startIndex?: number, stopIndex?: number): GlobalScopeTokenizationResult;
-  public tokenizeContent(content: string, scope: TokenizedScope.local, startIndex?: number, stopIndex?: number): LocalScopeTokenizationResult;
-  public tokenizeContent(content: string, scope: TokenizedScope, startIndex: number = 0, stopIndex: number = -1) {
-    const [lines, rawTokenizedContent] = this.tokenizeContentToRaw(content);
-
+    // Extract tokens from AST
     if (scope === TokenizedScope.global) {
-      return this.tokenizeLinesForGlobalScope(lines, rawTokenizedContent, startIndex, stopIndex);
+      return extractGlobalTokens(this.cachedAST);
     } else {
-      return this.tokenizeLinesForLocalScope(lines, rawTokenizedContent, startIndex, stopIndex);
+      const lines = content.split(/\r?\n/);
+      const actualStopIndex = stopIndex < 0 ? lines.length : stopIndex;
+      return extractLocalTokens(this.cachedAST, startIndex, actualStopIndex);
     }
   }
 
-  public tokenizeContentFromRaw(lines: string[], rawTokenizedContent: (IToken[] | undefined)[], startIndex: number = 0, stopIndex: number = -1) {
-    return this.tokenizeLinesForLocalScope(lines, rawTokenizedContent, startIndex, stopIndex);
+  /**
+   * Tokenize content from raw TextMate tokens to AST-based local scope.
+   * Bridge method for providers that still use TextMate for position queries.
+   */
+
+  public async tokenizeContentFromRaw(lines: string[], rawTokenizedContent: (IToken[] | undefined)[], startIndex: number = 0, stopIndex: number = -1) {
+    const content = lines.join("\n");
+    return await this.tokenizeContent(content, TokenizedScope.local, startIndex, stopIndex);
   }
+
+  /**
+   * Returns empty tokenization result based on scope.
+   */
+  private getEmptyResult(scope: TokenizedScope): GlobalScopeTokenizationResult | LocalScopeTokenizationResult {
+    if (scope === TokenizedScope.global) {
+      return { complexTokens: [], structComplexTokens: [], children: [] };
+    } else {
+      return { functionsComplexTokens: [], functionVariablesComplexTokens: [] };
+    }
+  }
+
+  // ============================================================================
+  // AST-BASED POSITION QUERIES (Preferred)
+  // ============================================================================
+  // These methods use AST tree structure for position-based queries.
+  // More accurate and faster than TextMate for most use cases.
+
+  /**
+   * Get the token at a specific position using AST.
+   * Preferred over TextMate-based method.
+   *
+   * @param content - The NWScript source code
+   * @param position - Cursor position (0-indexed)
+   * @param offset - Offset from position (not implemented yet)
+   * @returns Token information including type and content
+   */
+  public async getActionTargetAtPositionAST(
+    content: string,
+    position: Position,
+    offset: number = 0,
+  ): Promise<{
+    tokenType: CompletionItemKind | undefined;
+    lookBehindRawContent: string | undefined;
+    rawContent: string | undefined;
+  }> {
+    // Ensure we have parsed the content
+    await this.tokenizeContent(content, TokenizedScope.global);
+
+    if (!this.positionQuery) {
+      return {
+        tokenType: undefined,
+        lookBehindRawContent: undefined,
+        rawContent: undefined,
+      };
+    }
+
+    return this.positionQuery.getActionTargetAtPosition(position.line, position.character, offset);
+  }
+
+  /**
+   * Check if position is within a specific scope using AST.
+   *
+   * @param content - The NWScript source code
+   * @param position - Cursor position (0-indexed)
+   * @param scopeType - The scope type to check for
+   * @returns True if position is within the scope
+   */
+  public async isInScopeAST(content: string, position: Position, scopeType: string): Promise<boolean> {
+    await this.tokenizeContent(content, TokenizedScope.global);
+
+    if (!this.positionQuery) {
+      return false;
+    }
+
+    return this.positionQuery.isInScope(position.line, position.character, scopeType);
+  }
+
+  /**
+   * Get function name at cursor position using AST.
+   * Used for signature help.
+   *
+   * @param content - The NWScript source code
+   * @param position - Cursor position (0-indexed)
+   * @returns Function name or undefined
+   */
+  public async getFunctionNameAtPositionAST(content: string, position: Position): Promise<string | undefined> {
+    await this.tokenizeContent(content, TokenizedScope.global);
+
+    if (!this.positionQuery) {
+      return undefined;
+    }
+
+    return this.positionQuery.getFunctionNameAtPosition(position.line, position.character);
+  }
+
+  /**
+   * Get active parameter index at cursor position using AST.
+   * Used for signature help.
+   *
+   * @param content - The NWScript source code
+   * @param position - Cursor position (0-indexed)
+   * @returns Parameter index (0-based)
+   */
+  public async getActiveParameterIndexAST(content: string, position: Position): Promise<number> {
+    await this.tokenizeContent(content, TokenizedScope.global);
+
+    if (!this.positionQuery) {
+      return 0;
+    }
+
+    return this.positionQuery.getActiveParameterIndex(position.line, position.character);
+  }
+
+  // ============================================================================
+  // TEXTMATE-BASED TOKENIZATION (Legacy Position Queries)
+  // ============================================================================
+  // These methods use TextMate grammar for fine-grained position-based queries.
+  // Kept for compatibility, prefer AST-based methods above.
+  // Used for: LSP features like hover, autocomplete, signature help at cursor position
+
+  /**
+   * Tokenize content to raw TextMate tokens for position-based queries.
+   *
+   * @param content - The NWScript source code
+   * @returns Tuple of [lines, token arrays per line]
+   */
 
   public tokenizeContentToRaw(content: string): [lines: string[], rawTokenizedContent: (IToken[] | undefined)[]] {
     const lines = content.split(/\r?\n/);
@@ -403,15 +260,23 @@ export default class Tokenizer {
       lines,
       lines.map((line) => {
         const tokenizedLine = this.grammar?.tokenizeLine(line, ruleStack);
-
         if (tokenizedLine) {
           ruleStack = tokenizedLine.ruleStack;
         }
-
         return tokenizedLine?.tokens;
       }),
     ];
   }
+
+  /**
+   * Get the token at or near a specific position in the document.
+   *
+   * @param lines - Source code lines
+   * @param tokensArrays - TextMate tokens per line
+   * @param position - Cursor position
+   * @param offset - Offset from position (-1 for previous token, 1 for next)
+   * @returns Token information including type and content
+   */
 
   public getActionTargetAtPosition(lines: string[], tokensArrays: (IToken[] | undefined)[], position: Position, offset: number = 0) {
     let tokenType;
@@ -459,6 +324,16 @@ export default class Tokenizer {
     };
   }
 
+  /**
+   * Look backward from position to find content matching specific scopes.
+   * Used for finding function names in signature help.
+   *
+   * @param line - The source line
+   * @param tokensArray - TextMate tokens for this line
+   * @param position - Starting position
+   * @param languageScopes - Scopes to match (e.g., function identifier)
+   * @returns The matched token content
+   */
   public getLookBehindScopesRawContent(line: string, tokensArray: IToken[], position: Position, languageScopes: LanguageScopes[]) {
     let identifier: string | undefined;
     const tokenIndex = this.getTokenIndexAtPosition(tokensArray, position);
@@ -473,28 +348,66 @@ export default class Tokenizer {
     return identifier;
   }
 
+  /**
+   * Count occurrences of a specific scope when looking backward from position.
+   * Used for counting commas to determine active parameter in signature help.
+   *
+   * @param tokensArray - TextMate tokens for this line
+   * @param position - Starting position
+   * @param occurencesTarget - Scope to count (e.g., separator/comma)
+   * @param delimiter - Scope to stop at (e.g., function call start)
+   * @returns Number of occurrences found
+   */
+
   public getLookBehindScopeOccurences(tokensArray: IToken[], position: Position, occurencesTarget: LanguageScopes, delimiter: LanguageScopes) {
     let occurences = 0;
-
     let currentIndex = this.getTokenIndexAtPosition(tokensArray, position);
+
     while (currentIndex >= 0 && !tokensArray[currentIndex].scopes.includes(delimiter)) {
       if (tokensArray[currentIndex].scopes.includes(occurencesTarget)) {
         occurences++;
       }
-
       currentIndex--;
     }
 
     return occurences;
   }
 
+  /**
+   * Check if a position is within a specific language scope.
+   * Used for determining if cursor is inside a function call, etc.
+   *
+   * @param tokensArray - TextMate tokens for this line
+   * @param position - Position to check
+   * @param scope - Scope to check for (e.g., function call)
+   * @returns True if position is in the specified scope
+   */
   public isInScope(tokensArray: IToken[], position: Position, scope: LanguageScopes) {
     return this.getTokenAtPosition(tokensArray, position)?.scopes.includes(scope);
   }
 
-  public async loadGrammar() {
-    this.grammar = await this.registry.loadGrammar("source.nss");
+  // ============================================================================
+  // PRIVATE HELPER METHODS
+  // ============================================================================
 
-    return this;
+  /**
+   * Find the index of the token at a specific position.
+   */
+  private getTokenIndexAtPosition(tokensArray: IToken[], position: Position) {
+    return tokensArray.findIndex((token) => token.startIndex <= position.character && token.endIndex >= position.character);
+  }
+
+  /**
+   * Find the token at a specific position.
+   */
+  private getTokenAtPosition(tokensArray: IToken[], position: Position) {
+    return tokensArray.find((token) => token.startIndex <= position.character && token.endIndex >= position.character);
+  }
+
+  /**
+   * Extract the raw text content of a token.
+   */
+  private getRawTokenContent(line: string, token: IToken) {
+    return line.slice(token.startIndex, token.endIndex);
   }
 }

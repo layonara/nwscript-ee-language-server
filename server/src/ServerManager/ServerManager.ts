@@ -52,7 +52,7 @@ export default class ServerManger {
   }
 
   public async initialize() {
-    this.tokenizer.loadGrammar();
+    await this.tokenizer.loadGrammar();
     this.registerProviders();
     this.registerLiveDocumentsEvents();
 
@@ -69,8 +69,8 @@ export default class ServerManger {
     WorkspaceProvider.register(this);
 
     if (this.capabilitiesHandler.getSupportsWorkspaceConfiguration()) {
-      await ConfigurationProvider.register(this, async () => {
-        await this.loadConfig();
+      await ConfigurationProvider.register(this, () => {
+        void this.loadConfig();
       });
     }
 
@@ -89,7 +89,7 @@ export default class ServerManger {
     const nwscriptPath = filesPath.find((path) => path.includes("nwscript.nss"));
     const progressReporter = await this.connection.window.createWorkDoneProgress();
     const filesCount = filesPath.length;
-    this.logger.info(`Indexing files ...`);
+    this.logger.info("Indexing files ...");
 
     progressReporter.begin("Indexing files for NWScript: EE Language Server ...", 0);
     const partCount = Math.ceil(filesCount / numCPUs);
@@ -105,18 +105,20 @@ export default class ServerManger {
     }
 
     cluster.on("exit", () => {
-      if (Object.keys(cluster.workers || {}).length === 0) {
-        progressReporter?.done();
-        this.logger.info(`Indexed ${filesIndexedCount} files.`);
-        this.configLoaded = true;
-        this.diagnosticsProvider?.processDocumentsWaitingForPublish();
+      void (async () => {
+        if (Object.keys(cluster.workers || {}).length === 0) {
+          progressReporter?.done();
+          this.logger.info(`Indexed ${filesIndexedCount} files.`);
+          this.configLoaded = true;
+          await this.diagnosticsProvider?.processDocumentsWaitingForPublish();
 
-        if (nwscriptPath) {
-          const fileContent = readFileSync(nwscriptPath).toString();
-          const globalScope = this.tokenizer?.tokenizeContent(fileContent, TokenizedScope.global)!;
-          this.documentsCollection?.createDocument(pathToFileURL(nwscriptPath).href, globalScope);
+          if (nwscriptPath && this.tokenizer) {
+            const fileContent = readFileSync(nwscriptPath).toString();
+            const globalScope = await this.tokenizer.tokenizeContent(fileContent, TokenizedScope.global);
+            this.documentsCollection?.createDocument(pathToFileURL(nwscriptPath).href, globalScope);
+          }
         }
-      }
+      })();
     });
   }
 
@@ -135,12 +137,16 @@ export default class ServerManger {
   }
 
   private registerLiveDocumentsEvents() {
-    this.liveDocumentsManager.onDidSave((event) => this.diagnosticsProvider?.publish(event.document.uri));
-    this.liveDocumentsManager.onWillSave((event) => this.documentsCollection?.updateDocument(event.document, this.tokenizer, this.workspaceFilesSystem));
+    this.liveDocumentsManager.onDidSave((event) => {
+      void this.diagnosticsProvider?.publish(event.document.uri);
+    });
+    this.liveDocumentsManager.onWillSave(async (event) => {
+      await this.documentsCollection?.updateDocument(event.document, this.tokenizer, this.workspaceFilesSystem);
+    });
 
-    this.liveDocumentsManager.onDidOpen((event) => {
-      this.documentsCollection?.createDocuments(event.document.uri, event.document.getText(), this.tokenizer, this.workspaceFilesSystem);
-      this.diagnosticsProvider?.publish(event.document.uri);
+    this.liveDocumentsManager.onDidOpen(async (event) => {
+      await this.documentsCollection?.createDocuments(event.document.uri, event.document.getText(), this.tokenizer, this.workspaceFilesSystem);
+      void this.diagnosticsProvider?.publish(event.document.uri);
     });
   }
 

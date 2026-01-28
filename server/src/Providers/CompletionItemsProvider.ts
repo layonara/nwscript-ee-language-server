@@ -2,7 +2,7 @@ import { CompletionParams } from "vscode-languageserver";
 
 import type { ServerManager } from "../ServerManager";
 import { CompletionItemBuilder } from "./Builders";
-import { LocalScopeTokenizationResult } from "../Tokenizer/Tokenizer";
+import { LocalScopeTokenizationResult, TokenizedScope } from "../Tokenizer/Tokenizer";
 import { TriggerCharacters } from ".";
 import { Document } from "../Documents";
 import { LanguageTypes } from "../Tokenizer/constants";
@@ -17,7 +17,7 @@ export default class CompletionItemsProvider extends Provider {
   }
 
   private providerHandler(params: CompletionParams) {
-    return () => {
+    return async () => {
       const {
         textDocument: { uri },
         position,
@@ -27,11 +27,11 @@ export default class CompletionItemsProvider extends Provider {
       const document = this.server.documentsCollection.getFromUri(uri);
       if (!liveDocument || !document) return;
 
-      const [lines, rawTokenizedContent] = this.server.tokenizer.tokenizeContentToRaw(liveDocument.getText());
-      const localScope = this.server.tokenizer.tokenizeContentFromRaw(lines, rawTokenizedContent, 0, position.line);
+      const content = liveDocument.getText();
+      const localScope = await this.server.tokenizer.tokenizeContent(content, TokenizedScope.local, 0, position.line);
 
       if (params.context?.triggerCharacter === TriggerCharacters.dot) {
-        const { rawContent } = this.server.tokenizer.getActionTargetAtPosition(lines, rawTokenizedContent, position, -1);
+        const { rawContent } = await this.server.tokenizer.getActionTargetAtPositionAST(content, position, -1);
         const structIdentifer = localScope.functionVariablesComplexTokens.find((token) => token.identifier === rawContent)?.valueType;
 
         return document
@@ -42,7 +42,8 @@ export default class CompletionItemsProvider extends Provider {
           });
       }
 
-      if (this.server.tokenizer.getActionTargetAtPosition(lines, rawTokenizedContent, position, -2).rawContent === LanguageTypes.struct) {
+      const checkStruct = await this.server.tokenizer.getActionTargetAtPositionAST(content, position, -2);
+      if (checkStruct.rawContent === LanguageTypes.struct) {
         return document.getGlobalStructComplexTokens().map((token) => CompletionItemBuilder.buildItem(token));
       }
 

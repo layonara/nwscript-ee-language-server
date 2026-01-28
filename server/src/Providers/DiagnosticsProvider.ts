@@ -4,7 +4,6 @@ import { join, dirname, basename } from "path";
 import { fileURLToPath } from "url";
 import { Diagnostic, DiagnosticSeverity } from "vscode-languageserver";
 
-import { ServerManager } from "../ServerManager";
 import Provider from "./Provider";
 
 const lineNumber = /\(([^)]+)\)/;
@@ -19,10 +18,6 @@ enum OS {
 
 type FilesDiagnostics = { [uri: string]: Diagnostic[] };
 export default class DiagnoticsProvider extends Provider {
-  constructor(server: ServerManager) {
-    super(server);
-  }
-
   private generateDiagnostics(uris: string[], files: FilesDiagnostics, severity: DiagnosticSeverity) {
     return (line: string) => {
       const uri = uris.find((uri) => basename(fileURLToPath(uri)) === lineFilename.exec(line)![0]);
@@ -62,6 +57,7 @@ export default class DiagnoticsProvider extends Provider {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/promise-function-async
   public publish(uri: string) {
     return new Promise<boolean>((resolve, reject) => {
       const { enabled, nwnHome, reportWarnings, nwnInstallation, verbose, os } = this.server.config.compiler;
@@ -166,24 +162,16 @@ export default class DiagnoticsProvider extends Provider {
 
           // Actual errors
           if (line.includes("NOTFOUND")) {
-            return this.server.logger.error(
-              "Unable to resolve nwscript.nss. Are your Neverwinter Nights home and/or installation directories valid?",
-            );
+            return this.server.logger.error("Unable to resolve nwscript.nss. Are your Neverwinter Nights home and/or installation directories valid?");
           }
           if (line.includes("Failed to open .key archive")) {
-            return this.server.logger.error(
-              "Unable to open nwn_base.key Is your Neverwinter Nights installation directory valid?",
-            );
+            return this.server.logger.error("Unable to open nwn_base.key Is your Neverwinter Nights installation directory valid?");
           }
           if (line.includes("Unable to read input file")) {
             if (Boolean(nwnHome) || Boolean(nwnInstallation)) {
-              return this.server.logger.error(
-                "Unable to resolve provided Neverwinter Nights home and/or installation directories. Ensure the paths are valid in the extension settings.",
-              );
+              return this.server.logger.error("Unable to resolve provided Neverwinter Nights home and/or installation directories. Ensure the paths are valid in the extension settings.");
             } else {
-              return this.server.logger.error(
-                "Unable to automatically resolve Neverwinter Nights home and/or installation directories.",
-              );
+              return this.server.logger.error("Unable to automatically resolve Neverwinter Nights home and/or installation directories.");
             }
           }
         });
@@ -197,7 +185,7 @@ export default class DiagnoticsProvider extends Provider {
         if (reportWarnings) warnings.forEach(this.generateDiagnostics(uris, files, DiagnosticSeverity.Warning));
 
         for (const [uri, diagnostics] of Object.entries(files)) {
-          this.server.connection.sendDiagnostics({ uri, diagnostics });
+          void this.server.connection.sendDiagnostics({ uri, diagnostics });
         }
         resolve(true);
       });

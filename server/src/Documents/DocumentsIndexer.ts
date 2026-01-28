@@ -13,7 +13,7 @@ const generateTokens = async (filesPath: string[]) => {
   for (let i = 0; i < filesPath.length; i++) {
     const filePath = filesPath[i];
     const fileContent = readFileSync(filePath).toString();
-    const globalScope = tokenizer.tokenizeContent(fileContent, TokenizedScope.global);
+    const globalScope = await tokenizer.tokenizeContent(fileContent, TokenizedScope.global);
 
     process?.send!(JSON.stringify({ filePath, globalScope }));
   }
@@ -22,5 +22,5 @@ const generateTokens = async (filesPath: string[]) => {
 };
 
 process.on("message", (filesPath: string) => {
-  generateTokens(filesPath.split(","));
+  void generateTokens(filesPath.split(","));
 });

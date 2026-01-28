@@ -13,7 +13,7 @@ export default class SymbolsProvider extends Provider {
   }
 
   private providerHandler(params: DocumentSymbolParams) {
-    return () => {
+    return async () => {
       const {
         textDocument: { uri },
       } = params;
@@ -22,7 +22,7 @@ export default class SymbolsProvider extends Provider {
       const document = this.server.documentsCollection.getFromUri(uri);
       if (!liveDocument || !document) return;
 
-      const localScope = this.server.tokenizer.tokenizeContent(liveDocument.getText(), TokenizedScope.local);
+      const localScope = await this.server.tokenizer.tokenizeContent(liveDocument.getText(), TokenizedScope.local);
       const constantSymbols = document.complexTokens.filter((token) => token.tokenType === CompletionItemKind.Constant).map((token) => SymbolBuilder.buildItem(token));
       const structSymbols = document.structComplexTokens.map((token) => SymbolBuilder.buildItem(token));
 

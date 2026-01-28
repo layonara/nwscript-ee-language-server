@@ -6,6 +6,7 @@ import type { ComplexToken } from "../Tokenizer/types";
 import { HoverContentBuilder } from "./Builders";
 import { Document } from "../Documents";
 import Provider from "./Provider";
+import { TokenizedScope } from "../Tokenizer/Tokenizer";
 
 export default class HoverContentProvider extends Provider {
   constructor(server: ServerManager) {
@@ -15,7 +16,7 @@ export default class HoverContentProvider extends Provider {
   }
 
   private providerHandler(params: HoverParams) {
-    return () => {
+    return async () => {
       const {
         textDocument: { uri },
         position,
@@ -25,7 +26,7 @@ export default class HoverContentProvider extends Provider {
       const document = this.server.documentsCollection.getFromUri(uri);
       if (!liveDocument || !document) return;
 
-      let token = this.resolveToken(position, document, liveDocument);
+      const token = await this.resolveToken(position, document, liveDocument);
 
       if (token) {
         return {
@@ -35,13 +36,13 @@ export default class HoverContentProvider extends Provider {
     };
   }
 
-  private resolveToken(position: Position, document: Document, liveDocument: TextDocument) {
+  private async resolveToken(position: Position, document: Document, liveDocument: TextDocument) {
     let tokens;
     let token: ComplexToken | undefined;
 
-    const [lines, rawTokenizedContent] = this.server.tokenizer.tokenizeContentToRaw(liveDocument.getText());
-    const localScope = this.server.tokenizer.tokenizeContentFromRaw(lines, rawTokenizedContent, 0, position.line);
-    const { tokenType, lookBehindRawContent, rawContent } = this.server.tokenizer.getActionTargetAtPosition(lines, rawTokenizedContent, position);
+    const content = liveDocument.getText();
+    const localScope = await this.server.tokenizer.tokenizeContent(content, TokenizedScope.local, 0, position.line);
+    const { tokenType, lookBehindRawContent, rawContent } = await this.server.tokenizer.getActionTargetAtPositionAST(content, position);
 
     switch (tokenType) {
       case CompletionItemKind.Function:
@@ -60,7 +61,7 @@ export default class HoverContentProvider extends Provider {
         tokens = document.getGlobalStructComplexTokens();
         token = tokens.find((candidate) => candidate.identifier === rawContent);
         break;
-      case CompletionItemKind.Property:
+      case CompletionItemKind.Property: {
         const structIdentifer = localScope?.functionVariablesComplexTokens.find((candidate) => candidate.identifier === lookBehindRawContent)?.valueType;
 
         token = document
@@ -68,6 +69,7 @@ export default class HoverContentProvider extends Provider {
           .find((candidate) => candidate.identifier === structIdentifer)
           ?.properties.find((property) => property.identifier === rawContent);
         break;
+      }
       default:
         token = localScope.functionVariablesComplexTokens.find((candidate) => candidate.identifier === rawContent);
     }

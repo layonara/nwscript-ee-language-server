@@ -25,7 +25,7 @@ export default class DocumentsCollection extends Dictionnary<string, Document> {
       const directoryPath = normalize(join(__dirname, "..", "resources", static_resources_folder));
       const files = readdirSync(directoryPath);
       files.forEach((filename) => {
-        const tokens = JSON.parse(readFileSync(join(__dirname, "..", "resources", static_resources_folder, filename)).toString()) as any as GlobalScopeTokenizationResult;
+        const tokens = JSON.parse(readFileSync(join(__dirname, "..", "resources", static_resources_folder, filename)).toString()) as GlobalScopeTokenizationResult;
         this.addDocument(this.initializeDocument(`${STATIC_PREFIX}/${filename.replace(".json", FILES_EXTENSION)}`, true, tokens));
       });
     });
@@ -52,7 +52,7 @@ export default class DocumentsCollection extends Dictionnary<string, Document> {
       if (this.get(this.getKey(uri, false))) return;
 
       const fileContent = readFileSync(filePath).toString();
-      this.createDocuments(uri, fileContent, tokenizer, workespaceFilesSystem);
+      void this.createDocuments(uri, fileContent, tokenizer, workespaceFilesSystem);
     });
   }
 
@@ -72,16 +72,16 @@ export default class DocumentsCollection extends Dictionnary<string, Document> {
     this.addDocument(this.initializeDocument(uri, false, globalScope));
   }
 
-  public createDocuments(uri: string, content: string, tokenizer: Tokenizer, workespaceFilesSystem: WorkspaceFilesSystem) {
-    const globalScope = tokenizer.tokenizeContent(content, TokenizedScope.global);
+  public async createDocuments(uri: string, content: string, tokenizer: Tokenizer, workespaceFilesSystem: WorkspaceFilesSystem) {
+    const globalScope = await tokenizer.tokenizeContent(content, TokenizedScope.global);
 
     this.addDocument(this.initializeDocument(uri, false, globalScope));
     this.createChildrenDocument(globalScope.children, tokenizer, workespaceFilesSystem);
   }
 
-  public updateDocument(document: TextDocument, tokenizer: Tokenizer, workespaceFilesSystem: WorkspaceFilesSystem) {
+  public async updateDocument(document: TextDocument, tokenizer: Tokenizer, workespaceFilesSystem: WorkspaceFilesSystem) {
     const currentChildren = this.getFromUri(document.uri)?.children;
-    const globalScope = tokenizer.tokenizeContent(document.getText(), TokenizedScope.global);
+    const globalScope = await tokenizer.tokenizeContent(document.getText(), TokenizedScope.global);
     const newChildren = globalScope.children.filter((child) => !currentChildren!.includes(child));
 
     this.overwriteDocument(this.initializeDocument(document.uri, false, globalScope));
