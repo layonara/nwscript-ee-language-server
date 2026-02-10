@@ -1,9 +1,8 @@
 import { spawn } from "child_process";
-import { type, tmpdir } from "os";
-import { join, dirname, basename, parse } from "path";
+import { type } from "os";
+import { join, dirname, basename } from "path";
 import { fileURLToPath } from "url";
 import { Diagnostic, DiagnosticSeverity } from "vscode-languageserver";
-import fs from "fs";
 
 import { ServerManager } from "../ServerManager";
 import Provider from "./Provider";
@@ -24,37 +23,12 @@ export default class DiagnoticsProvider extends Provider {
     super(server);
   }
 
-  private generateDiagnostics(originalFilePath: string, uris: string[], files: FilesDiagnostics, severity: DiagnosticSeverity) {
+  private generateDiagnostics(uris: string[], files: FilesDiagnostics, severity: DiagnosticSeverity) {
     return (line: string) => {
-      const originalFileNoExt = parse(originalFilePath).name; // extracts the name portion without an extension
       const lineFilenameMatch = lineFilename.exec(line);
       if (lineFilenameMatch) {
-        let reportedFileName = lineFilenameMatch[2];
-        const isTempFile = reportedFileName === `${originalFileNoExt}_temp.nss`;
-
-        // If it's the temp file, map it back to the original
-        if (isTempFile) {
-          reportedFileName = `${originalFileNoExt}.nss`;
-        }
-        
+        const reportedFileName = lineFilenameMatch[2];
         const uri = uris.find((uri) => basename(fileURLToPath(uri)) === reportedFileName);
-        if (uri) {
-          let linePosition = Number(lineNumber.exec(line)![1]) - 1;
-          linePosition = isTempFile ? linePosition - 1 : linePosition; // -1 again to account for the void main we intruduced
-          const diagnostic = {
-            severity,
-            range: {
-              start: { line: linePosition, character: 0 },
-              end: { line: linePosition, character: Number.MAX_VALUE },
-            },
-            message: lineMessage.exec(line)![2].trim(),
-          };
-
-          files[uri].push(diagnostic);
-        }
-      } else {
-        const uri = uris.find((uri) => basename(fileURLToPath(uri)) === lineFilename.exec(line)![2]);
-
         if (uri) {
           const linePosition = Number(lineNumber.exec(line)![1]) - 1;
           const diagnostic = {
@@ -130,7 +104,8 @@ export default class DiagnoticsProvider extends Provider {
       // The compiler command:
       //  - y; continue on error
       //  - s; dry run
-      const args = ["-y", "-s"];
+      //  - n; no entry point required (for include files)
+      const args = ["-y", "-s", "-n"];
       if (Boolean(nwnHome)) {
         args.push("--userdirectory");
         args.push(`"${nwnHome}"`);
@@ -143,41 +118,25 @@ export default class DiagnoticsProvider extends Provider {
       } else if (verbose) {
         this.server.logger.info("Trying to resolve Neverwinter Nights installation directory automatically.");
       }
-      if (children.length > 0) {
-        const directories = [...new Set(uris.map((uri) => dirname(fileURLToPath(uri))))];
-
-        // Ensure trailing slashes
-        const dirsWithSlash = directories.map(p => p.endsWith("\\") ? p : p + "\\");
-
-        // Wrap each in escaped quotes, join by comma
-        const dirsArg = dirsWithSlash.map(p => `"${p}"`).join(',');
-        // Each directory is wrapped in quotes, then joined with commas
+      // Collect directories from ALL indexed documents so the compiler can
+      // resolve the full transitive include chain, not just direct children.
+      const allDirs: Set<string> = new Set();
+      this.server.documentsCollection.forEach((doc) => {
+        if (doc.uri && doc.uri.startsWith("file://")) {
+          allDirs.add(dirname(fileURLToPath(doc.uri)));
+        }
+      });
+      // Also add the compiled file's own directory
+      allDirs.add(dirname(fileURLToPath(uri)));
+      if (allDirs.size > 0) {
         args.push("--dirs");
-        args.push(dirsArg);
+        args.push(`"${[...allDirs].join(",")}"`);
       }
 
       const filePath = fileURLToPath(uri);
-      const fileContent = fs.readFileSync(filePath, "utf8");
-      const hasVoidMain = fileContent.includes("void main");
-
-      let compilePath = filePath; // default to original
-
-      if (!hasVoidMain) {
-        this.server.logger.info(`Adding void main to ${filePath} for compilation.`);
-        const lines = fileContent.split("\n");
-        lines.splice(0, 0, "void main() {}");
-
-        const originalFileNoExt = parse(filePath).name;
-        const tempFileName = `${originalFileNoExt}_temp.nss`;
-        const tempFilePath = join(tmpdir(), tempFileName);
-        this.server.logger.info(`Writing temporary file to ${tempFilePath}`);
-        fs.writeFileSync(tempFilePath, lines.join("\n"), "utf8");
-        compilePath = tempFilePath;
-      }
-
-      this.server.logger.info(`Compiling file: ${compilePath}`);
+      this.server.logger.info(`Compiling file: ${filePath}`);
       args.push("-c");
-      args.push(`"${compilePath}"`);
+      args.push(`"${filePath}"`);
 
       let stdout = "";
       let stderr = "";
@@ -238,19 +197,11 @@ export default class DiagnoticsProvider extends Provider {
         }
 
         uris.push(document.uri);
-        errors.forEach(this.generateDiagnostics(filePath, uris, files, DiagnosticSeverity.Error));
-        if (reportWarnings) warnings.forEach(this.generateDiagnostics(filePath, uris, files, DiagnosticSeverity.Warning));
+        errors.forEach(this.generateDiagnostics(uris, files, DiagnosticSeverity.Error));
+        if (reportWarnings) warnings.forEach(this.generateDiagnostics(uris, files, DiagnosticSeverity.Warning));
 
         for (const [uri, diagnostics] of Object.entries(files)) {
           this.server.connection.sendDiagnostics({ uri, diagnostics });
-        }
-
-        if (!hasVoidMain) {
-          try {
-            fs.unlinkSync(compilePath);
-          } catch {
-            this.server.logger.error(`Failed to delete temporary file: ${compilePath}`);
-          }
         }
 
         resolve(true);
