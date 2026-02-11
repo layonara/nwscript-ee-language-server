@@ -105,7 +105,9 @@ export default class DiagnoticsProvider extends Provider {
       //  - y; continue on error
       //  - s; dry run
       //  - n; no entry point required (for include files)
-      const args = ["-y", "-s", "-n"];
+      //  - E; collect and report all errors (not just the first)
+      // Note: -E requires compiler binary with ABI v2+
+      const args = ["-y", "-s", "-n", "-E"];
       if (Boolean(nwnHome)) {
         args.push("--userdirectory");
         args.push(`"${nwnHome}"`);
