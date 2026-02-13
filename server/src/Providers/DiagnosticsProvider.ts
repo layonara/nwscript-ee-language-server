@@ -148,7 +148,7 @@ export default class DiagnoticsProvider extends Provider {
         this.server.logger.info(JSON.stringify(args, null, 4));
       }
 
-      const child = spawn(join(__dirname, this.getExecutablePath(os)), args, { shell: 'powershell.exe' });
+      const child = spawn(join(__dirname, this.getExecutablePath(os)), args, { shell: true });
 
       child.stdout.on("data", (chunk: string) => (stdout += chunk));
       child.stderr.on("data", (chunk: string) => (stderr += chunk));
