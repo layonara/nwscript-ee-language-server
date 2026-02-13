@@ -30,17 +30,21 @@ export default class DiagnoticsProvider extends Provider {
         const reportedFileName = lineFilenameMatch[2];
         const uri = uris.find((uri) => basename(fileURLToPath(uri)) === reportedFileName);
         if (uri) {
-          const linePosition = Number(lineNumber.exec(line)![1]) - 1;
-          const diagnostic = {
-            severity,
-            range: {
-              start: { line: linePosition, character: 0 },
-              end: { line: linePosition, character: Number.MAX_VALUE },
-            },
-            message: lineMessage.exec(line)![2].trim(),
-          };
+          const lineNumberMatch = lineNumber.exec(line);
+          const lineMessageMatch = lineMessage.exec(line);
+          if (lineNumberMatch && lineMessageMatch) {
+            const linePosition = Number(lineNumberMatch[1]) - 1;
+            const diagnostic = {
+              severity,
+              range: {
+                start: { line: linePosition, character: 0 },
+                end: { line: linePosition, character: Number.MAX_VALUE },
+              },
+              message: lineMessageMatch[2].trim(),
+            };
 
-          files[uri].push(diagnostic);
+            files[uri].push(diagnostic);
+          }
         }
       }
     };
