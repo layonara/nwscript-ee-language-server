@@ -100,6 +100,7 @@ I think we can consider the extension stable and out of beta. A big thank you to
 
 ## [2.2.0]
 
+- The compilation engine has been migrated from nwnsc to nwn_script_comp.
 - Script definitions bumped to version 89.8193.37.15, thanks to Peorthijel.
 - Bumped dependencies and fixed some dependabot issues.
 
