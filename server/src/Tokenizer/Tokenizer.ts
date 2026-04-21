@@ -59,7 +59,8 @@ export default class Tokenizer {
     return tokensArray.find((token) => token.startIndex <= position.character && token.endIndex >= position.character);
   }
 
-  private getRawTokenContent(line: string, token: IToken) {
+  private getRawTokenContent(line: string, token: IToken | undefined) {
+    if (!token) return "";
     return line.slice(token.startIndex, token.endIndex);
   }
 
