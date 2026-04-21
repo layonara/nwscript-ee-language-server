@@ -5,7 +5,11 @@ export default class WorkspaceProvider extends Provider {
   constructor(server: ServerManager) {
     super(server);
 
-    this.server.connection.workspace.onDidChangeWorkspaceFolders(() => {});
+    try {
+      this.server.connection.workspace.onDidChangeWorkspaceFolders(() => {});
+    } catch {
+      // Client doesn't support workspace folder change events — safe to ignore
+    }
     this.server.connection.onDidChangeWatchedFiles(() => {});
   }
 }

@@ -1,7 +1,7 @@
 import { cpus } from "os";
 import { join } from "path";
 import { readFileSync } from "fs";
-import { pathToFileURL } from "url";
+import { pathToFileURL, fileURLToPath } from "url";
 import * as clustering from "cluster";
 import type { Connection, InitializeParams } from "vscode-languageserver";
 
@@ -43,7 +43,8 @@ export default class ServerManger {
     this.connection = connection;
     this.logger = new Logger(connection.console);
     this.capabilitiesHandler = new CapabilitiesHandler(params.capabilities);
-    this.workspaceFilesSystem = new WorkspaceFilesSystem(params.rootPath!, params.workspaceFolders!);
+    const rootPath = params.rootPath ?? (params.rootUri ? fileURLToPath(params.rootUri) : process.cwd());
+    this.workspaceFilesSystem = new WorkspaceFilesSystem(rootPath, params.workspaceFolders ?? []);
     this.liveDocumentsManager = new LiveDocumentsManager();
     this.documentsCollection = new DocumentsCollection();
     this.tokenizer = new Tokenizer();
@@ -145,11 +146,18 @@ export default class ServerManger {
   }
 
   private async loadConfig() {
-    const { completion, hovering, formatter, compiler, ...rest } = await this.connection.workspace.getConfiguration("nwscript-ee-lsp");
-    this.config = { ...this.config, ...rest };
-    this.config.completion = { ...this.config.completion, ...completion };
-    this.config.hovering = { ...this.config.hovering, ...hovering };
-    this.config.formatter = { ...this.config.formatter, ...formatter };
-    this.config.compiler = { ...this.config.compiler, ...compiler };
+    try {
+      const result = await this.connection.workspace.getConfiguration("nwscript-ee-lsp");
+      if (result) {
+        const { completion, hovering, formatter, compiler, ...rest } = result;
+        this.config = { ...this.config, ...rest };
+        this.config.completion = { ...this.config.completion, ...completion };
+        this.config.hovering = { ...this.config.hovering, ...hovering };
+        this.config.formatter = { ...this.config.formatter, ...formatter };
+        this.config.compiler = { ...this.config.compiler, ...compiler };
+      }
+    } catch {
+      // Client doesn't support workspace/configuration — use defaults
+    }
   }
 }
